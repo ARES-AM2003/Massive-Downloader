@@ -12,8 +12,23 @@ export interface DownloadRequest {
 export class DownloadManager {
   private taskQueue: string[] = [];
   private activeWorkers = new Map<string, Worker>();
+  private activeTransfers = new Set<string>();
   private directoryHandle: FileSystemDirectoryHandle | null = null;
   private concurrencyLimit = 3;
+  private isPaused = false;
+  
+  public onProgress?: (stats: { 
+    totalFiles: number; 
+    completedFiles: number; 
+    stagedFiles: number;    
+    transferredFiles: number; 
+    totalBytes: number; 
+    downloadedBytes: number; 
+    activeFiles: string[];
+    activeTransfers: string[];
+  }) => void;
+
+  private progressAnimationFrame: number | null = null;
 
   constructor() {
     this.hydrateFromStore();
@@ -31,32 +46,51 @@ export class DownloadManager {
         this.taskQueue.push(state.id);
       }
     }
+    this.reportProgress();
   }
 
   public async startDownloads(requests: DownloadRequest[]): Promise<void> {
-    if (!('showDirectoryPicker' in window)) {
-      throw new Error('File System Access API is not supported in this browser. Please use a compatible browser like Chrome, Edge, or Opera.');
-    }
+    const isNativeSupported = 'showDirectoryPicker' in window;
 
-    // 1. Quota Check (require 1.1x total size)
+    // 1. Quota Check
     const totalRequiredSize = requests.reduce((sum, req) => sum + req.totalSize, 0);
     const estimate = await navigator.storage.estimate();
     if (estimate.quota !== undefined && estimate.usage !== undefined) {
       const available = estimate.quota - estimate.usage;
-      if (available < totalRequiredSize * 1.1) {
-        throw new Error('Insufficient storage quota available.');
+      
+      // If Native FS is supported, we only need space for concurrent downloads + buffer (e.g. 1GB)
+      // because we delete files from OPFS after moving to local disk.
+      const bufferSize = 1024 * 1024 * 1024; // 1GB safety buffer
+      const requiredBuffer = isNativeSupported ? Math.min(totalRequiredSize, bufferSize) : totalRequiredSize;
+
+      if (available < requiredBuffer * 1.1) {
+        const availMB = (available / (1024 * 1024)).toFixed(0);
+        const reqMB = (requiredBuffer / (1024 * 1024)).toFixed(0);
+        const error = new Error(`Insufficient storage quota. Available: ${availMB}MB, Required: ${reqMB}MB.`);
+        (error as any).quotaExceeded = true;
+        (error as any).available = available;
+        (error as any).required = totalRequiredSize;
+        throw error;
       }
     }
 
-    // 2. Prompt for Directory
-    try {
-      this.directoryHandle = await (window as any).showDirectoryPicker({ mode: 'readwrite' });
-    } catch (err: any) {
-      if (err.name === 'AbortError') {
-        console.warn('User cancelled directory selection.');
-        return;
+    // 2. Prompt for Directory (only if supported and not already set)
+    if (isNativeSupported && !this.directoryHandle) {
+      try {
+        const handle = await (window as any).showDirectoryPicker({ mode: 'readwrite' });
+        if (handle) {
+          this.directoryHandle = handle;
+          console.log('Directory handle acquired successfully:', handle.name);
+        }
+      } catch (err: any) {
+        if (err.name === 'AbortError') {
+          console.warn('User cancelled directory selection.');
+          // We can still proceed with OPFS-only staging if we want, 
+          // but usually Abort means stop. Let's still add to queue.
+        } else {
+          throw err;
+        }
       }
-      throw err;
     }
 
     // 3. Register tasks in DB
@@ -84,8 +118,11 @@ export class DownloadManager {
   }
 
   private async processQueue() {
-    if (!this.directoryHandle) return;
+    if (this.isPaused) return;
 
+    // Check if we can proceed without directory handle (for OPFS-only staging)
+    // In Fallback/ZIP mode, we don't need directoryHandle yet.
+    
     while (this.activeWorkers.size < this.concurrencyLimit && this.taskQueue.length > 0) {
       const nextId = this.taskQueue.shift()!;
       const metadata = await stateStore.getFileMetadata(nextId);
@@ -93,13 +130,20 @@ export class DownloadManager {
       if (!metadata) continue;
 
       if (metadata.status === 'completed') {
-        // Needs sequence: OPFS -> Local FS
-        this.transferToLocalDisk(metadata);
+        // Needs sequence: OPFS -> Local FS (only if handle available)
+        if (this.directoryHandle) {
+          this.transferToLocalDisk(metadata);
+        } else {
+          // Stay in completed state in OPFS until ZIP finalized or Handle provided
+          continue;
+        }
       } else {
         // Needs downloading
         this.startWorker(metadata);
       }
     }
+    
+    this.reportProgress();
   }
 
   private startWorker(metadata: FileDownloadMetadata) {
@@ -116,6 +160,14 @@ export class DownloadManager {
             downloadedSize: msg.downloadedSize,
             status: 'downloading',
           });
+          this.reportProgress();
+          break;
+        case 'metadata_update':
+          await stateStore.upsertFileMetadata({
+            ...metadata,
+            totalSize: msg.totalSize,
+          });
+          this.reportProgress();
           break;
         case 'completed':
           await stateStore.upsertFileMetadata({
@@ -124,8 +176,10 @@ export class DownloadManager {
           });
           this.activeWorkers.delete(metadata.id);
           worker.terminate();
-          // Initiate move to disk
-          await this.transferToLocalDisk(metadata);
+          // Initiate move to disk if possible
+          if (this.directoryHandle) {
+            await this.transferToLocalDisk(metadata);
+          }
           this.processQueue();
           break;
         case 'error':
@@ -173,6 +227,9 @@ export class DownloadManager {
   }
 
   private async transferToLocalDisk(metadata: FileDownloadMetadata) {
+    this.activeTransfers.add(metadata.id);
+    this.reportProgress();
+    
     try {
       const rootDir = await navigator.storage.getDirectory();
       const opfsFileHandle = await rootDir.getFileHandle(metadata.id);
@@ -186,7 +243,6 @@ export class DownloadManager {
       const writable = await localFileHandle.createWritable();
 
       // Stream the data from OPFS to Native File System
-      // pipeTo automatically handles closing the WritableStream on finish
       await opfsFile.stream().pipeTo(writable);
 
       // Clean up OPFS cache
@@ -205,13 +261,64 @@ export class DownloadManager {
         status: 'error',
         errorMessage: err.message || String(err),
       });
+    } finally {
+      this.activeTransfers.delete(metadata.id);
+      this.reportProgress();
     }
   }
 
-  public pauseDownload(id: string) {
-    const worker = this.activeWorkers.get(id);
-    if (worker) {
-      worker.postMessage({ type: 'pause', id } as WorkerInMessage);
+  public togglePause() {
+    this.isPaused = !this.isPaused;
+    if (this.isPaused) {
+      // Pause all active workers
+      for (const [id, worker] of this.activeWorkers) {
+        worker.postMessage({ type: 'pause', id } as WorkerInMessage);
+      }
+    } else {
+      // Resume
+      this.processQueue();
     }
+  }
+
+  public isBusy(): boolean {
+    return this.activeWorkers.size > 0 || this.taskQueue.length > 0;
+  }
+
+  public getPaused(): boolean {
+    return this.isPaused;
+  }
+
+  public setDirectoryHandle(handle: FileSystemDirectoryHandle) {
+    this.directoryHandle = handle;
+    this.processQueue();
+  }
+
+  public hasDirectoryHandle(): boolean {
+    return this.directoryHandle !== null;
+  }
+
+  public reportProgress() {
+    if (!this.onProgress || this.progressAnimationFrame !== null) return;
+
+    this.progressAnimationFrame = requestAnimationFrame(async () => {
+      this.progressAnimationFrame = null;
+      const all = await stateStore.getAll();
+      
+      const staged = all.filter(f => f.status === 'completed');
+      const transferred = all.filter(f => f.status === 'transferred');
+      
+      const stats = {
+        totalFiles: all.length,
+        completedFiles: staged.length + transferred.length,
+        stagedFiles: staged.length,
+        transferredFiles: transferred.length,
+        totalBytes: all.reduce((acc, f) => acc + f.totalSize, 0),
+        downloadedBytes: all.reduce((acc, f) => acc + f.downloadedSize, 0),
+        activeFiles: Array.from(this.activeWorkers.keys()),
+        activeTransfers: Array.from(this.activeTransfers)
+      };
+
+      this.onProgress?.(stats);
+    });
   }
 }

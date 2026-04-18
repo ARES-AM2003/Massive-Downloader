@@ -1,5 +1,6 @@
-import { DownloadManager } from './DownloadManager';
+import { DownloadManager, DownloadRequest } from './DownloadManager';
 import { ZipStreamingManager, ZipDownloadRequest } from './ZipStreamingManager';
+import { stateStore } from './StateStore';
 
 const apiUrlInput = document.getElementById('api-url') as HTMLInputElement;
 const fetchApiButton = document.getElementById('fetch-api') as HTMLButtonElement;
@@ -7,7 +8,24 @@ const manualInput = document.getElementById('url-input') as HTMLTextAreaElement;
 const startManualButton = document.getElementById('start-download') as HTMLButtonElement;
 const statusDiv = document.getElementById('status') as HTMLDivElement;
 
+// Dashboard Elements
+const dashboard = document.getElementById('dashboard') as HTMLDivElement;
+const statFiles = document.getElementById('stat-files') as HTMLDivElement;
+const statSpeed = document.getElementById('stat-speed') as HTMLDivElement;
+const progressPercent = document.getElementById('progress-percent') as HTMLSpanElement;
+const progressFill = document.getElementById('progress-fill') as HTMLDivElement;
+const activeFilesList = document.getElementById('active-files-list') as HTMLDivElement;
+const pauseResumeBtn = document.getElementById('pause-resume-btn') as HTMLButtonElement;
+const finalizeZipBtn = document.getElementById('finalize-zip-btn') as HTMLButtonElement;
+const directZipBtn = document.getElementById('direct-zip-btn') as HTMLButtonElement;
+const resetBtn = document.getElementById('reset-btn') as HTMLButtonElement;
+
 const manager = new DownloadManager();
+let zipManager: ZipStreamingManager | null = null;
+let currentRequests: DownloadRequest[] = [];
+let lastBytes: number | null = null;
+let lastTime = Date.now();
+let speedSamples: number[] = [];
 
 function updateStatus(text: string, type: 'info' | 'error' | 'success' = 'info') {
     statusDiv.textContent = text;
@@ -17,130 +35,256 @@ function updateStatus(text: string, type: 'info' | 'error' | 'success' = 'info')
 }
 
 /**
- * Extracts a clean filename from a URL, with special handling for S3/CDN signatures.
+ * Extracts a clean filename from a URL
  */
 function extractFileName(urlStr: string, index: number): string {
     try {
         const url = new URL(urlStr);
-        // 1. Try to get filename from the last part of the path
         let name = url.pathname.split('/').pop() || '';
-        
-        // 2. If it's an S3 URL, the path might be just a key. 
-        // We want the actual filename part if it contains a dot.
         if (!name.includes('.') || name.length < 3) {
             name = `file-${index}`;
         }
-
-        // Clean up common query params that might stick to the name if parsed poorly
         return decodeURIComponent(name).split('?')[0];
     } catch {
         return `file-${index}`;
     }
 }
 
+// 1. Dashboard Logic
+manager.onProgress = (stats) => {
+    dashboard.style.display = 'block';
+    statFiles.textContent = `${stats.completedFiles} / ${stats.totalFiles}`;
+    
+    // Robust speed calculation (moving average)
+    const now = Date.now();
+    if (lastBytes === null) {
+        lastBytes = stats.downloadedBytes;
+        lastTime = now;
+        return;
+    }
+
+    const duration = (now - lastTime) / 1000;
+    if (duration >= 1) {
+        const bytesDiff = Math.max(0, stats.downloadedBytes - lastBytes);
+        const instantSpeed = bytesDiff / duration;
+        
+        speedSamples.push(instantSpeed);
+        if (speedSamples.length > 5) speedSamples.shift();
+        
+        const avgSpeed = speedSamples.reduce((a, b) => a + b, 0) / speedSamples.length;
+        
+        statSpeed.textContent = avgSpeed > 1024 * 1024 
+            ? `${(avgSpeed / (1024 * 1024)).toFixed(1)} MB/s` 
+            : `${(avgSpeed / 1024).toFixed(0)} KB/s`;
+            
+        lastBytes = stats.downloadedBytes;
+        lastTime = now;
+    }
+
+    // Switch progress to file-count completion for better UX
+    const percent = stats.totalFiles > 0 ? (stats.completedFiles / stats.totalFiles) * 100 : 0;
+    progressPercent.textContent = `${percent.toFixed(1)}%`;
+    progressFill.style.width = `${percent}%`;
+
+    // Active files preview (Downloading + Saving)
+    const downloadingItems = stats.activeFiles.map(id => `
+        <div class="active-file-item">
+            <span>${id.substring(0, 20)}...</span>
+            <span style="color: var(--accent);">Downloading</span>
+        </div>
+    `);
+    
+    const savingItems = stats.activeTransfers.map(id => `
+        <div class="active-file-item">
+            <span style="max-width: 150px; overflow: hidden; text-overflow: ellipsis;">${id.substring(0, 20)}...</span>
+            <span style="color: #4ade80;">Saving to Folder</span>
+        </div>
+    `);
+
+    activeFilesList.innerHTML = [...downloadingItems, ...savingItems].join('');
+
+    // Accurate Status Reporting
+    if (stats.totalFiles > 0) {
+        if (stats.transferredFiles === stats.totalFiles) {
+            updateStatus('All files transferred successfully!', 'success');
+            finalizeZipBtn.style.display = 'none';
+        } else if (manager.hasDirectoryHandle()) {
+            // Priority: Show transfer status if handle is active
+            if (stats.completedFiles === stats.totalFiles) {
+                updateStatus(`Saving ${stats.stagedFiles} remaining files to your folder...`, 'info');
+                finalizeZipBtn.style.display = 'flex';
+            } else {
+                updateStatus(`Downloading & Transferring... ${stats.transferredFiles} saved, ${stats.stagedFiles} staged.`, 'info');
+            }
+        } else if (stats.completedFiles === stats.totalFiles) {
+            // Staged but no handle
+            finalizeZipBtn.style.display = 'flex';
+            updateStatus(`All items are ready in browser cache! Click "Finalize ZIP" or pick a folder to save.`, 'info');
+        } else {
+            // Still downloading to OPFS
+            updateStatus(`Downloading... ${stats.completedFiles} of ${stats.totalFiles} items processed.`, 'info');
+        }
+    }
+};
+
+// 2. Control Handlers
+pauseResumeBtn.addEventListener('click', () => {
+    manager.togglePause();
+    const isPaused = manager.getPaused();
+    pauseResumeBtn.innerHTML = isPaused 
+        ? `<svg width="18" height="18" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg> Resume`
+        : `<svg width="18" height="18" fill="currentColor" viewBox="0 0 24 24"><path d="M6 4h4v16H6zm8 0h4v16h-4z"/></svg> Pause`;
+    pauseResumeBtn.classList.toggle('paused', isPaused);
+});
+
+resetBtn.addEventListener('click', async () => {
+    if (confirm('Clear all progress and stored files?')) {
+        await stateStore.clearAll();
+        const root = await navigator.storage.getDirectory();
+        // Clear OPFS
+        for await (const name of (root as any).keys()) {
+            await root.removeEntry(name, { recursive: true });
+        }
+        window.location.reload();
+    }
+});
+
+finalizeZipBtn.addEventListener('click', async () => {
+    if (!zipManager) zipManager = new ZipStreamingManager();
+    
+    finalizeZipBtn.disabled = true;
+    updateStatus('Generating ZIP from cache... Please wait.', 'info');
+    
+    const zipRequests: ZipDownloadRequest[] = currentRequests.map(r => ({
+        url: r.url,
+        fileName: r.fileName,
+        opfsId: r.id
+    }));
+
+    try {
+        await zipManager.streamArchive('bnt-export.zip', zipRequests);
+        updateStatus('Success! ZIP file created.', 'success');
+    } catch (err: any) {
+        updateStatus(`ZIP Error: ${err.message}`, 'error');
+    } finally {
+        finalizeZipBtn.disabled = false;
+    }
+});
+
+directZipBtn.addEventListener('click', async () => {
+    if (!zipManager) zipManager = new ZipStreamingManager();
+    
+    dashboard.style.display = 'block';
+    directZipBtn.disabled = true;
+    updateStatus('Streaming directly from network... Progress cannot be resumed if tab closes.', 'info');
+    
+    const zipRequests: ZipDownloadRequest[] = currentRequests.map(r => ({
+        url: r.url,
+        fileName: r.fileName
+        // No opfsId -> will use fetch
+    }));
+
+    try {
+        await zipManager.streamArchive('bnt-export.zip', zipRequests);
+        updateStatus('Success! Direct ZIP created.', 'success');
+    } catch (err: any) {
+        updateStatus(`Direct ZIP Error: ${err.message}`, 'error');
+    } finally {
+        directZipBtn.disabled = false;
+        directZipBtn.style.display = 'none';
+    }
+});
+
+// 3. Main Flow
 async function runDownloadFlow(urls: string[]) {
     try {
-        updateStatus(`Analyzing ${urls.length} URLs (Performing discovery)...`);
-        
-        const rawRequests = await Promise.all(urls.map(async (urlStr, i) => {
-            let fileName = extractFileName(urlStr, i);
-            let totalSize = 5 * 1024 * 1024; // Default guess 5MB if discovery fails
-            
-            try {
-                // HEAD request to get real size and content-disposition
-                const head = await fetch(urlStr, { method: 'HEAD' });
-                if (head.ok) {
-                    const len = head.headers.get('content-length');
-                    if (len) totalSize = parseInt(len, 10);
-                    
-                    const cd = head.headers.get('content-disposition');
-                    if (cd && cd.includes('filename=')) {
-                        // Extract filename from header: filename="my-video.mp4"
-                        const match = cd.match(/filename=["']?([^"']+)["']?/);
-                        if (match && match[1]) fileName = match[1];
-                    }
-                }
-            } catch (e) {
-                console.warn('Metadata discovery failed for:', urlStr, e);
-            }
+        // Reset stats tracking
+        lastBytes = null;
+        lastTime = Date.now();
+        speedSamples = [];
 
-            return {
-                id: `bnt-${btoa(urlStr).substring(0, 16)}-${i}`,
-                url: urlStr,
-                fileName: fileName,
-                totalSize: totalSize
-            };
+        updateStatus(`Initializing ${urls.length} downloads...`);
+        
+        currentRequests = urls.map((urlStr, i) => ({
+            id: `bnt-${btoa(urlStr).substring(0, 16)}-${i}`,
+            url: urlStr,
+            fileName: extractFileName(urlStr, i),
+            totalSize: 0 // Discovered dynamically by workers
         }));
 
-        const requests = rawRequests.filter(r => r !== null);
-
-        if (requests.length === 0) {
-            updateStatus('No valid binary targets found in the URL list.', 'error');
-            return;
-        }
-
-        updateStatus('Granting folder access... Please select a destination folder.');
+        const isNativeSupported = 'showDirectoryPicker' in window;
         
-        try {
-            await manager.startDownloads(requests);
-            updateStatus(`Success! Streaming ${requests.length} files to disk. Check your local folder.`, 'success');
-        } catch (err: any) {
-            // Check for File System Access API support
-            if (err.message && err.message.includes('File System Access API is not supported')) {
-                updateStatus('Native folder access unavailable. Starting ZIP Streaming fallback...', 'info');
-                
-                const zipManager = new ZipStreamingManager();
-                const zipRequests: ZipDownloadRequest[] = requests.map(r => ({
-                    url: r.url,
-                    fileName: r.fileName
-                }));
-
-                await zipManager.streamArchive('bnt-export.zip', zipRequests);
-                updateStatus('ZIP Streaming started! Your browser will prompt for a single ZIP file save.', 'success');
+        if (isNativeSupported) {
+            updateStatus(`Ready to save ${currentRequests.length} files. Please select a destination folder.`, 'info');
+            await manager.startDownloads(currentRequests);
+            if (manager.hasDirectoryHandle()) {
+                updateStatus('Destination confirmed! Starting transfers...', 'success');
+                manager.reportProgress();
             } else {
-                throw err;
+                updateStatus('Folder selection skipped. Staging files to browser cache instead...', 'info');
             }
+        } else {
+            updateStatus('Native folder access unavailable. Using browser cache staging.', 'info');
+            await manager.startDownloads(currentRequests); 
         }
     } catch (err: any) {
-        updateStatus(`Error: ${err.message}`, 'error');
+        if (err.quotaExceeded) {
+            dashboard.style.display = 'block';
+            directZipBtn.style.display = 'flex';
+            updateStatus(`Quota full (${(err.available / (1024 * 1024)).toFixed(0)} MB left). Try Direct Download?`, 'error');
+        } else {
+            updateStatus(`Error: ${err.message}`, 'error');
+        }
         console.error(err);
     }
 }
 
-// Handler for API Fetch
+// 4. Tab-Close Protection
+window.addEventListener('beforeunload', (e) => {
+    const isBusy = manager.isBusy() || (zipManager && zipManager.isBusy);
+    if (isBusy) {
+        e.preventDefault();
+        e.returnValue = 'Download in progress. Closing the tab will interrupt and potentially corrupt the download. Are you sure?';
+        return e.returnValue;
+    }
+});
+
+// 5. Initial Resume Check
+(async () => {
+    const existing = await stateStore.getAll();
+    if (existing.length > 0) {
+        dashboard.style.display = 'block';
+        manager.reportProgress(); // Triggers onProgress to sync the bar immediately
+        
+        const pending = existing.filter(f => f.status !== 'transferred');
+        if (pending.length > 0) {
+            updateStatus(`Previous session found: ${pending.length} files are ready to be saved. Click "Start" to pick a folder or "Finalize ZIP".`, 'info');
+            currentRequests = existing.map(f => ({
+                id: f.id,
+                url: f.url,
+                fileName: f.fileName,
+                totalSize: f.totalSize
+            }));
+        } else {
+            updateStatus('All files from previous session were saved successfully!', 'success');
+        }
+    }
+})();
+
 fetchApiButton.addEventListener('click', async () => {
     const url = apiUrlInput.value.trim();
-    if (!url) {
-        updateStatus('Please enter a valid API Endpoint URL.', 'error');
-        return;
-    }
-
+    if (!url) return;
     try {
-        updateStatus(`Fetching presigned URLs from ${new URL(url).hostname}...`);
+        updateStatus(`Fetching URLs...`);
         const response = await fetch(url);
-        if (!response.ok) throw new Error(`API returned ${response.status}: ${response.statusText}`);
-        
         const data = await response.json();
-        const urls = data.presignedUrls;
-
-        if (!Array.isArray(urls) || urls.length === 0) {
-            throw new Error('Invalid response format: "presignedUrls" array not found or empty.');
-        }
-
-        await runDownloadFlow(urls);
+        await runDownloadFlow(data.presignedUrls);
     } catch (err: any) {
         updateStatus(`API Fetch Failed: ${err.message}`, 'error');
     }
 });
 
-// Handler for Manual Input
 startManualButton.addEventListener('click', async () => {
-    const rawInput = manualInput.value.trim();
-    if (!rawInput) {
-        updateStatus('Please enter at least one URL.', 'error');
-        return;
-    }
-
-    const urls = rawInput.split(',').map(u => u.trim()).filter(u => u.length > 0);
-    await runDownloadFlow(urls);
+    const urls = manualInput.value.split(',').map(u => u.trim()).filter(u => u.length > 0);
+    if (urls.length > 0) await runDownloadFlow(urls);
 });
