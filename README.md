@@ -15,16 +15,36 @@ A modern, high-throughput batch download manager for the browser. This project i
 
 The system is built on a "Worker-First" philosophy:
 
-1.  **Main Thread**: Handles discovery (HEAD requests) and orchestration.
+1.  **Main Thread**: Handles discovery (HEAD requests), UI updates, and orchestrates the worker queue.
 2.  **Download Worker**: Performs the raw `fetch`. Writes chunks synchronously to OPFS using the high-performance `FileSystemSyncAccessHandle`.
-3.  **Zip Worker**: Handles chunked compression for the streaming fallback path.
-4.  **State Store**: A dedicated IndexedDB wrapper that keeps track of every file's status (`pending`, `downloading`, `completed`, `transferred`, `error`).
+3.  **Zip Worker**: Handles chunked compression for the streaming fallback path using `fflate`.
+4.  **State Store**: A dedicated IndexedDB wrapper for persistence and resumability.
 
-### Data Flow (Native Mode)
-`Fetch (Network)` ➔ `Download Worker` ➔ `OPFS (Sync Access)` ➔ `Main Thread Move` ➔ `User Local Disk`
+### Native Data Pipeline (Chrome/Edge)
+```mermaid
+graph TD
+    UI[UI / API Input] --> Main[Main Thread Orchestrator]
+    Main --> Discovery[HEAD Requests / Discovery]
+    Discovery --> Queue[Task Queue]
+    Queue --> Worker[Download Worker]
+    Worker --> Fetch[Fetch API]
+    Fetch --> OPFS[OPFS Caching]
+    OPFS --> Sync[Sync Access Handle]
+    Sync --> Finish[Signal Complete]
+    Finish --> Move[System Move: OPFS -> Local Disk]
+    Move --> Done[Download Verified]
+```
 
-### Data Flow (Fallback Mode)
-`Fetch (Network)` ➔ `Zip Worker (fflate)` ➔ `StreamSaver` ➔ `Final ZIP Download`
+### Fallback Data Pipeline (Firefox/Safari)
+```mermaid
+graph TD
+    Flow[ZIP Streaming Flow] --> Main[Main Thread]
+    Main --> Fetch[Fetch Streams]
+    Fetch --> Compressor[Stream Compressor]
+    Compressor --> Worker[Zip Worker / fflate]
+    Worker --> SS[StreamSaver / ServiceWorker]
+    SS --> Browser[Browser Download Manager]
+```
 
 ## 🛠️ Technology Stack
 
