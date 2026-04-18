@@ -3,10 +3,14 @@ import { ZipStreamingManager, ZipDownloadRequest } from './ZipStreamingManager';
 import { stateStore } from './StateStore';
 
 const apiUrlInput = document.getElementById('api-url') as HTMLInputElement;
-const fetchApiButton = document.getElementById('fetch-api') as HTMLButtonElement;
 const manualInput = document.getElementById('url-input') as HTMLTextAreaElement;
 const startManualButton = document.getElementById('start-download') as HTMLButtonElement;
+const startFlyZipButton = document.getElementById('start-fly-zip') as HTMLButtonElement;
 const statusDiv = document.getElementById('status') as HTMLDivElement;
+
+// API Buttons
+const fetchApiButton = document.getElementById('fetch-api') as HTMLButtonElement;
+const fetchZipButton = document.getElementById('fetch-zip') as HTMLButtonElement;
 
 // Dashboard Elements
 const dashboard = document.getElementById('dashboard') as HTMLDivElement;
@@ -201,6 +205,25 @@ directZipBtn.addEventListener('click', async () => {
 });
 
 // 3. Main Flow
+async function runFlyZipFlow(urls: string[]) {
+    try {
+        if (!zipManager) zipManager = new ZipStreamingManager();
+        resumeSection.style.display = 'none';
+        dashboard.style.display = 'block';
+        updateStatus('Initializing Streaming ZIP... (No browser storage used)', 'info');
+
+        const zipRequests: ZipDownloadRequest[] = urls.map((urlStr, i) => ({
+            url: urlStr,
+            fileName: extractFileName(urlStr, i)
+        }));
+
+        await zipManager.streamArchive('bnt-batch-download.zip', zipRequests);
+        updateStatus('Success! ZIP file streaming complete.', 'success');
+    } catch (err: any) {
+        updateStatus(`ZIP Streaming Error: ${err.message}`, 'error');
+        console.error(err);
+    }
+}
 async function runDownloadFlow(urls: string[]) {
     try {
         resumeSection.style.display = 'none'; // Clear resume prompt if starting new or continuing
@@ -301,7 +324,25 @@ fetchApiButton.addEventListener('click', async () => {
     }
 });
 
+fetchZipButton.addEventListener('click', async () => {
+    const url = apiUrlInput.value.trim();
+    if (!url) return;
+    try {
+        updateStatus(`Fetching URLs for ZIP...`);
+        const response = await fetch(url);
+        const data = await response.json();
+        await runFlyZipFlow(data.presignedUrls);
+    } catch (err: any) {
+        updateStatus(`API ZIP Failed: ${err.message}`, 'error');
+    }
+});
+
 startManualButton.addEventListener('click', async () => {
     const urls = manualInput.value.split(',').map(u => u.trim()).filter(u => u.length > 0);
     if (urls.length > 0) await runDownloadFlow(urls);
+});
+
+startFlyZipButton.addEventListener('click', async () => {
+    const urls = manualInput.value.split(',').map(u => u.trim()).filter(u => u.length > 0);
+    if (urls.length > 0) await runFlyZipFlow(urls);
 });

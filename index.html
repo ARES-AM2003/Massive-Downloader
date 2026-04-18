@@ -317,9 +317,12 @@
         <div class="section">
             <label for="api-url">Option 1: Fetch from API Endpoint</label>
             <input type="text" id="api-url" placeholder="https://api.yoursite.com/v1/downloads/session-123" />
-            <button id="fetch-api" style="width: 100%;">
+            <button id="fetch-api" style="width: 100%; margin-bottom: 0.5rem;">
                 <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
-                Fetch & Download
+                Fetch & Download (Native)
+            </button>
+            <button id="fetch-zip" style="width: 100%; border-color: var(--accent); color: var(--accent); background: transparent; border: 1px solid var(--accent);">
+                Fetch & ZIP (On-the-Fly)
             </button>
         </div>
 
@@ -328,8 +331,11 @@
         <div class="section">
             <label for="url-input">Option 2: Paste Direct URLs</label>
             <textarea id="url-input" rows="4" placeholder="https://example.com/file1.mp4, https://example.com/file2.zip"></textarea>
-            <button id="start-download" class="secondary" style="width: 100%;">
-                Start Direct Download
+            <button id="start-download" class="secondary" style="width: 100%; margin-bottom: 0.5rem;">
+                Start Direct Download (Resumable)
+            </button>
+            <button id="start-fly-zip" class="secondary" style="width: 100%; border-color: var(--accent); color: var(--accent);">
+                Download ZIP (On-the-Fly)
             </button>
         </div>
 
