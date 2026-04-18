@@ -278,8 +278,24 @@
             padding: 0.25rem 0;
             border-bottom: 1px solid rgba(255, 255, 255, 0.05);
         }
+
+        #resume-section {
+            display: none;
+            background: rgba(99, 102, 241, 0.15);
+            border: 1px solid var(--primary);
+            padding: 1.5rem;
+            border-radius: 16px;
+            margin-bottom: 2rem;
+            text-align: center;
+        }
+
+        #resume-section h3 {
+            margin-bottom: 1rem;
+            color: var(--text);
+            font-size: 1.1rem;
+        }
     </style>
-  <script type="module" crossorigin src="/assets/index-45rk_oLM.js"></script>
+  <script type="module" crossorigin src="/assets/index-B8jsjRNz.js"></script>
 </head>
 <body>
     <div class="container">
@@ -287,6 +303,17 @@
             <h1>BNT Downloader</h1>
             <p class="subtitle">High-performance batch downloading service</p>
         </header>
+
+        <div id="resume-section">
+            <h3>Previous Session Found</h3>
+            <p id="resume-info" style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.9rem;">
+                There are files pending from your last visit.
+            </p>
+            <button id="resume-session-btn" style="width: 100%; background-color: var(--accent);">
+                <svg width="20" height="20" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                Continue Session & Select Folder
+            </button>
+        </div>
 
         <div class="section">
             <label for="api-url">Option 1: Fetch from API Endpoint</label>

@@ -178,7 +178,7 @@ export class DownloadManager {
           worker.terminate();
           // Initiate move to disk if possible
           if (this.directoryHandle) {
-            await this.transferToLocalDisk(metadata);
+            this.transferToLocalDisk(metadata);
           }
           this.processQueue();
           break;
@@ -319,6 +319,12 @@ export class DownloadManager {
       };
 
       this.onProgress?.(stats);
+
+      // Auto-cleanup after 100% transfer
+      if (stats.totalFiles > 0 && stats.transferredFiles === stats.totalFiles && this.activeTransfers.size === 0) {
+        console.log('Batch complete. Cleaning up manifest...');
+        await stateStore.clearAll();
+      }
     });
   }
 }

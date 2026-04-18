@@ -20,6 +20,11 @@ const finalizeZipBtn = document.getElementById('finalize-zip-btn') as HTMLButton
 const directZipBtn = document.getElementById('direct-zip-btn') as HTMLButtonElement;
 const resetBtn = document.getElementById('reset-btn') as HTMLButtonElement;
 
+// Resume Elements
+const resumeSection = document.getElementById('resume-section') as HTMLDivElement;
+const resumeInfo = document.getElementById('resume-info') as HTMLParagraphElement;
+const resumeSessionBtn = document.getElementById('resume-session-btn') as HTMLButtonElement;
+
 const manager = new DownloadManager();
 let zipManager: ZipStreamingManager | null = null;
 let currentRequests: DownloadRequest[] = [];
@@ -198,6 +203,7 @@ directZipBtn.addEventListener('click', async () => {
 // 3. Main Flow
 async function runDownloadFlow(urls: string[]) {
     try {
+        resumeSection.style.display = 'none'; // Clear resume prompt if starting new or continuing
         // Reset stats tracking
         lastBytes = null;
         lastTime = Date.now();
@@ -254,22 +260,33 @@ window.addEventListener('beforeunload', (e) => {
     const existing = await stateStore.getAll();
     if (existing.length > 0) {
         dashboard.style.display = 'block';
-        manager.reportProgress(); // Triggers onProgress to sync the bar immediately
+        manager.reportProgress();
         
         const pending = existing.filter(f => f.status !== 'transferred');
         if (pending.length > 0) {
-            updateStatus(`Previous session found: ${pending.length} files are ready to be saved. Click "Start" to pick a folder or "Finalize ZIP".`, 'info');
+            resumeSection.style.display = 'block';
+            resumeInfo.textContent = `Found ${pending.length} files from your last visit. Click below to pick a folder and continue.`;
+            
             currentRequests = existing.map(f => ({
                 id: f.id,
                 url: f.url,
                 fileName: f.fileName,
                 totalSize: f.totalSize
             }));
+
+            // Clear status message to focus on the Resume button
+            updateStatus('Previous session detected.', 'info');
         } else {
             updateStatus('All files from previous session were saved successfully!', 'success');
         }
     }
 })();
+
+resumeSessionBtn.addEventListener('click', () => {
+    if (currentRequests.length > 0) {
+        runDownloadFlow(currentRequests.map(r => r.url));
+    }
+});
 
 fetchApiButton.addEventListener('click', async () => {
     const url = apiUrlInput.value.trim();
