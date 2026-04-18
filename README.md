@@ -21,30 +21,14 @@ The system is built on a "Worker-First" philosophy:
 4.  **State Store**: A dedicated IndexedDB wrapper for persistence and resumability.
 
 ### Native Data Pipeline (Chrome/Edge)
-```mermaid
-graph TD
-    UI[UI / API Input] --> Main[Main Thread Orchestrator]
-    Main --> Discovery[HEAD Requests / Discovery]
-    Discovery --> Queue[Task Queue]
-    Queue --> Worker[Download Worker]
-    Worker --> Fetch[Fetch API]
-    Fetch --> OPFS[OPFS Caching]
-    OPFS --> Sync[Sync Access Handle]
-    Sync --> Finish[Signal Complete]
-    Finish --> Move[System Move: OPFS -> Local Disk]
-    Move --> Done[Download Verified]
-```
+![Native Architecture](./assets/architecture-native.png)
 
 ### Fallback Data Pipeline (Firefox/Safari)
-```mermaid
-graph TD
-    Flow[ZIP Streaming Flow] --> Main[Main Thread]
-    Main --> Fetch[Fetch Streams]
-    Fetch --> Compressor[Stream Compressor]
-    Compressor --> Worker[Zip Worker / fflate]
-    Worker --> SS[StreamSaver / ServiceWorker]
-    SS --> Browser[Browser Download Manager]
-```
+![Fallback Architecture](./assets/architecture-fallback.png)
+
+> [!NOTE]
+> **Implementation Improvement**: While the fallback diagram mentions "no folder structure," the current codebase **does** preserve relative paths in the ZIP archive by prepending the `relativePath` to each file's path during the compression stage.
+
 
 ## 🛠️ Technology Stack
 
